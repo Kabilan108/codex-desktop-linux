@@ -5277,6 +5277,48 @@ test_launcher_marketplace_metadata_atomic_staging() (
         || fail "Marketplace metadata staging must not follow a destination directory symlink"
 )
 
+test_launcher_marketplace_staging_path_trust() (
+    info "Checking bundled marketplace staging path trust"
+    local workspace="$TMP_DIR/launcher-marketplace-path-trust"
+    local function_file="$workspace/path-functions.sh"
+    local real_home="$workspace/real-codex-home"
+    local linked_home="$workspace/linked-codex-home"
+    local dangling_home="$workspace/dangling-codex-home"
+    local nested_home="$workspace/nested-codex-home"
+    local nested_tmp_target="$workspace/nested-tmp-target"
+
+    mkdir -p "$workspace" "$real_home"
+    awk '/^make_path_owner_trusted\(\) \{/{copy=1} copy{print} copy && /^}/{exit}' \
+        "$REPO_DIR/launcher/start.sh.template" > "$function_file"
+    awk '/^path_has_unsafe_write\(\) \{/{copy=1} copy{print} copy && /^}/{exit}' \
+        "$REPO_DIR/launcher/start.sh.template" >> "$function_file"
+    awk '/^prepare_bundled_marketplace_tmp_paths\(\) \{/{copy=1} copy{print} copy && /^}/{exit}' \
+        "$REPO_DIR/launcher/start.sh.template" >> "$function_file"
+    # shellcheck source=/dev/null
+    source "$function_file"
+
+    ln -s "$real_home" "$linked_home"
+    CODEX_HOME="$linked_home"
+    prepare_bundled_marketplace_tmp_paths full
+    [ -d "$real_home/.tmp/bundled-marketplaces/openai-bundled/.agents/plugins" ] \
+        || fail "Expected staging through a resolved CODEX_HOME symlink"
+    [ -d "$real_home/.tmp/bundled-marketplaces/openai-bundled/plugins" ] \
+        || fail "Expected plugin staging through a resolved CODEX_HOME symlink"
+
+    ln -s "$workspace/missing-codex-home" "$dangling_home"
+    CODEX_HOME="$dangling_home"
+    if prepare_bundled_marketplace_tmp_paths; then
+        fail "Expected a dangling CODEX_HOME symlink to be rejected"
+    fi
+
+    mkdir -p "$nested_home" "$nested_tmp_target"
+    ln -s "$nested_tmp_target" "$nested_home/.tmp"
+    CODEX_HOME="$nested_home"
+    if prepare_bundled_marketplace_tmp_paths; then
+        fail "Expected a symlink below CODEX_HOME to be rejected"
+    fi
+)
+
 test_launcher_template_sanity() {
     info "Checking launcher template markers"
     assert_contains "$REPO_DIR/launcher/start.sh.template" "codex_capture_original_ld_library_path"
@@ -10441,6 +10483,7 @@ main() {
     test_launcher_extra_bundled_plugin_cache_rollback
     test_launcher_extra_bundled_plugin_cache_concurrent_destination
     test_launcher_rejects_missing_webview_entrypoint
+    test_launcher_marketplace_staging_path_trust
     test_launcher_marketplace_metadata_atomic_staging
     test_launcher_template_sanity
     test_launcher_warm_start_recovery
