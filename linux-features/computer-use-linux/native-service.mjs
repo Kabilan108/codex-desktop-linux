@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url';
 const parameters = {
   list_apps: [],
   get_app_state: ['include_screenshot'],
+  screenshot: [],
   click: ['x', 'y', 'button', 'click_count', 'relative'],
   scroll: ['x', 'y', 'direction', 'pages', 'relative'],
   press_key: ['key'],
@@ -82,6 +83,7 @@ export function createNativeService({
     const { method, app, params = {} } = input ?? {};
     if (!Object.hasOwn(parameters, method)) throw new Error('This native Linux Computer Use operation is not supported');
     if (!params || typeof params !== 'object' || Array.isArray(params) || Object.keys(params).some(key => !parameters[method].includes(key))) throw new Error('Unsupported native operation parameter');
+    if (method === 'screenshot' && app === undefined) throw new Error('A non-empty native app id is required');
     let target = {};
     if (app !== undefined) {
       if (typeof app !== 'string' || !app.trim()) throw new Error('A non-empty native app id is required');
@@ -102,6 +104,13 @@ export function createNativeService({
     }
     if (method === 'get_app_state' && data.window_error) throw new Error(data.window_error);
     if (data.ok === false) throw new Error(data.message || 'Linux Computer Use action failed');
+    if (method === 'screenshot') {
+      const images = result?.content?.filter(item => item.type === 'image') ?? [];
+      if (data.cropped_to_window !== true || images.length !== 1 || !images[0].data || !/^image\//.test(images[0].mimeType)) {
+        throw new Error('Linux Computer Use backend returned no valid targeted screenshot');
+      }
+      return { screenshot: { ...data, data_url: `data:${images[0].mimeType};base64,${images[0].data}` } };
+    }
     if (method === 'list_apps') {
       if (data.error) throw new Error(data.error);
       return data.windows.map(window => ({ id: `linux-window:${window.window_id}`, displayName: window.app_id || window.wm_class || window.title || 'Linux app', title: window.title, isRunning: true, focused: window.focused }));

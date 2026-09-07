@@ -13,7 +13,7 @@ export function installLinuxComputerUse(cua) {
   cua.getApp = async (app) => {
     if (typeof app !== 'string' || !app.trim()) throw new Error('getApp requires a non-empty app id');
     const unsupported = async () => { throw new Error('This native Linux Computer Use operation is not supported'); };
-    const state = (screenshot) => call('get_app_state', app, { include_screenshot: screenshot });
+    const state = () => call('get_app_state', app, { include_screenshot: false });
     const screenshotMetadata = (result) => result.screenshot ? {
       width: result.screenshot.width, height: result.screenshot.height,
       coordinate_width: result.screenshot.coordinate_width,
@@ -35,10 +35,15 @@ export function installLinuxComputerUse(cua) {
       return { x: target[0], y: target[1] };
     };
     const target = {
-      getAXState: async (options = {}) => emit(axText(await state(false)), options),
-      getScreenshot: async (options = {}) => screenshot(await state(true), options),
+      getAXState: async (options = {}) => emit(axText(await state()), options),
+      getScreenshot: async (options = {}) => screenshot(await call('screenshot', app), options),
       getAXStateAndScreenshot: async (options = {}) => {
-        const result = await state(true);
+        // Capture raises the target first, so the passive AX observation sees
+        // its resulting window state. Failed capture is reported, never retried.
+        let capture;
+        try { capture = await call('screenshot', app); }
+        catch (error) { capture = { screenshot_error: error.message }; }
+        const result = { ...await state(), ...capture };
         return { state: emit(axText(result), options), ...(result.screenshot ? { screenshot: await screenshot(result, options) } : {}) };
       },
       click: (location, options = {}) => call('click', app, { ...point(location), button: options.mouseButton ?? 'left', click_count: options.clickCount ?? 1, relative: true }),
@@ -51,7 +56,7 @@ export function installLinuxComputerUse(cua) {
       },
       drag: unsupported, selectText: unsupported, setValue: unsupported, performSecondaryAction: unsupported,
     };
-    emit('Linux native app APIs: getAXState(), getScreenshot(), getAXStateAndScreenshot(), click([x,y], {mouseButton?,clickCount?}), pressKey(key), typeText(text), scroll([x,y], direction, pages?), paste(text). Click/scroll coordinates are window-relative in the reported screenshot coordinate_width/coordinate_height space; screenshots may be downscaled. Accessibility bounds are screen coordinates and must not be passed directly to click/scroll; display scaling can differ. Native window_context is retained for geometry inspection. Element-index actions, drag, rich paste, selectText, setValue, and secondary actions are unsupported. Input uses the Linux backend and may require OS permissions.');
+    emit('Linux native app APIs: getAXState(), getScreenshot(), getAXStateAndScreenshot(), click([x,y], {mouseButton?,clickCount?}), pressKey(key), typeText(text), scroll([x,y], direction, pages?), paste(text). Screenshot APIs bring the selected window forward; getAXState() remains passive. Click/scroll coordinates are window-relative in the reported screenshot coordinate_width/coordinate_height space; screenshots may be downscaled. Accessibility bounds are screen coordinates and must not be passed directly to click/scroll; display scaling can differ. Native window_context is retained for geometry inspection. Element-index actions, drag, rich paste, selectText, setValue, and secondary actions are unsupported. Input uses the Linux backend and may require OS permissions.');
     await target.getAXState();
     return target;
   };

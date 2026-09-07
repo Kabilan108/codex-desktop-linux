@@ -31,15 +31,16 @@ test('trusted service validates requests before backend launch', async () => {
   await assert.rejects(handleRpc({ method: 'click', app: 'editor', params: { window_id: 22 } }), /parameter/);
 });
 
-const { mkdtemp, writeFile, rm } = require('node:fs/promises');
+const { mkdtemp, writeFile, readFile, rm } = require('node:fs/promises');
 const { tmpdir } = require('node:os');
 const { join } = require('node:path');
-async function fixture(t, { windowId, structured = false } = {}) {
+async function fixture(t, { windowId, structured = false, capture = false, captureError = false, captureMalformed } = {}) {
   const dir = await mkdtemp(join(tmpdir(), 'native-mcp-'));
   const script = join(dir, 'backend.cjs');
+  const log = join(dir, 'requests.jsonl');
   await writeFile(script, `
 const readline = require('node:readline');
-let initialized = false;
+let initialized = false, focused = false;
 readline.createInterface({ input: process.stdin }).on('line', line => {
   const r = JSON.parse(line);
   const reply = result => process.stdout.write(JSON.stringify({jsonrpc:'2.0',id:r.id,result})+'\\n');
@@ -47,6 +48,16 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
   if(r.method === 'notifications/initialized') { initialized=true; return; }
   if(!initialized) process.exit(9);
   const {name,arguments:a} = r.params;
+  require('node:fs').appendFileSync(${JSON.stringify(log)}, line+'\\n');
+  if (${capture}) {
+    if(name === 'get_app_state') return reply({content:[{type:'text',text:JSON.stringify({accessibility_tree:[{name:'Document'}],window_context:{focused},...(a.include_screenshot ? {screenshot_error:'requested window is not focused'} : {})})}]});
+    if(name === 'screenshot') {
+      if(${captureError}) return reply({isError:true,content:[{type:'text',text:'requested window could not be focused exactly'}]});
+      focused = true;
+      return reply({content:[{type:'image',mimeType:'image/png',data:'AQID'},{type:'text',text:JSON.stringify({width:100,height:50,coordinate_width:200,coordinate_height:100,cropped_to_window:${captureMalformed !== 'uncropped'},scale:0.5})}].filter(item => !(${captureMalformed === 'missing-image'} && item.type === 'image'))});
+    }
+    return reply({isError:true,content:[{type:'text',text:'unexpected operation'}]});
+  }
   if(a.text === 'exit') process.exit(7);
   if(a.text === 'tool-error') return reply({isError:true,content:[{type:'text',text:'denied by backend'}]});
   if(a.window_id === 99) return reply({structuredContent:{window_error:'window no longer exists',accessibility_tree:[]},content:[]});
@@ -69,7 +80,7 @@ readline.createInterface({ input: process.stdin }).on('line', line => {
   const { createNativeService } = await import('./native-service.mjs');
   const service = createNativeService({ command: process.execPath, args: [script], timeoutMs: 1000 });
   t.after(async () => { service.shutdown(); await rm(dir, {recursive:true,force:true}); });
-  return service;
+  return { ...service, readCalls: async () => (await readFile(log, 'utf8')).trim().split('\n').map(line => JSON.parse(line, (key, value, context) => key === 'window_id' ? context.source : value).params) };
 }
 
 test('MCP initialization, exact window IDs, targeted inputs and desktop inputs', async t => {
@@ -159,3 +170,68 @@ test('native observations return image bytes and expose screenshot errors and co
     await assert.rejects(async()=>app.click(3),/element-index.*not supported/);
   } finally { globalThis.nodeRepl=original; }
 });
+
+for (const api of ['getScreenshot', 'getAXStateAndScreenshot']) {
+  test(`${api} captures a background exact u64 target through client and service`, async t => {
+    const service = await fixture(t, { capture: true });
+    const { installLinuxComputerUse } = await import('./native-client.mjs');
+    const original = globalThis.nodeRepl;
+    const images = [], writes = [];
+    globalThis.nodeRepl = { write: value => writes.push(value), emitImage: async value => images.push(value), rpc: (_, request) => service.handleRpc(request) };
+    try {
+      const app = await installLinuxComputerUse({}).getApp('linux-window:18446744073709551615');
+      assert.equal(JSON.parse(await app.getAXState({emit:false})).window_context.focused, false);
+      const result = await app[api]();
+      assert.deepEqual([...(api === 'getScreenshot' ? result : result.screenshot)], [1,2,3]);
+      assert.deepEqual(images, ['data:image/png;base64,AQID']);
+      assert.deepEqual(writes.find(value => value?.screenshot)?.screenshot, {width:100,height:50,coordinate_width:200,coordinate_height:100});
+      if (api === 'getAXStateAndScreenshot') {
+        const state = JSON.parse(result.state);
+        assert.equal(state.window_context.focused, true);
+        assert.deepEqual(state.accessibility_tree, [{name:'Document'}]);
+        assert.equal(state.screenshot.coordinate_width, 200);
+      }
+      const calls = await service.readCalls();
+      assert.equal(calls.filter(call => call.name === 'screenshot').length, 1);
+      assert.ok(calls.every(call => call.arguments.window_id === '18446744073709551615'));
+      assert.ok(calls.filter(call => call.name === 'get_app_state').every(call => call.arguments.include_screenshot === false));
+    } finally { globalThis.nodeRepl = original; }
+  });
+
+  test(`${api} exposes failed exact activation without capture fallback or replay`, async t => {
+    const service = await fixture(t, {capture:true, captureError:true});
+    const { installLinuxComputerUse } = await import('./native-client.mjs');
+    const original = globalThis.nodeRepl;
+    globalThis.nodeRepl = {write(){}, emitImage: async () => assert.fail('failed capture emitted an image'), rpc: (_, request) => service.handleRpc(request)};
+    try {
+      const app = await installLinuxComputerUse({}).getApp('editor');
+      if(api === 'getScreenshot') await assert.rejects(app[api]({emit:false}), /could not be focused exactly/);
+      else {
+        const result = await app[api]({emit:false});
+        assert.match(JSON.parse(result.state).screenshot_error, /could not be focused exactly/);
+        assert.equal(result.screenshot, undefined);
+      }
+      const calls = await service.readCalls();
+      assert.equal(calls.filter(call => call.name === 'screenshot').length, 1);
+      assert.ok(calls.every(call => call.arguments.app_id === 'editor'));
+      assert.ok(calls.every(call => call.name === 'screenshot' || (call.name === 'get_app_state' && call.arguments.include_screenshot === false)));
+    } finally { globalThis.nodeRepl = original; }
+  });
+}
+
+test('screenshot service requires a target and rejects desktop or focus overrides before launch', async t => {
+  const { createNativeService } = await import('./native-service.mjs');
+  const service = createNativeService({command:'/nonexistent/native-backend'});
+  t.after(() => service.shutdown());
+  await assert.rejects(service.handleRpc({method:'screenshot'}), /app id is required/);
+  for (const params of [{full_screen:true}, {raise_window:false}, {window_id:22}]) {
+    await assert.rejects(service.handleRpc({method:'screenshot',app:'editor',params}), /parameter/);
+  }
+});
+
+for (const captureMalformed of ['missing-image', 'uncropped']) {
+  test(`screenshot service rejects ${captureMalformed} backend capture`, async t => {
+    const service = await fixture(t, {capture:true, captureMalformed});
+    await assert.rejects(service.handleRpc({method:'screenshot',app:'editor'}), /targeted screenshot/);
+  });
+}

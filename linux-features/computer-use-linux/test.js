@@ -75,7 +75,7 @@ test("staging extends the hidden unified plugin and invalidates the browser-only
   fs.writeFileSync(launcherPath, originalLauncher);
   stage();
   const version = JSON.parse(fs.readFileSync(path.join(target, ".codex-plugin/plugin.json"))).version;
-  assert.notEqual(version, "26.901.41600");
+  assert.equal(version, "26.901.41600-linux-native.2");
   assert.deepEqual(JSON.parse(fs.readFileSync(marketplacePath)).plugins.map(p => p.name), ["unified-computer-use", "browser", "computer-use"]);
   const settingsManifest = JSON.parse(fs.readFileSync(path.join(target, "../computer-use/.codex-plugin/plugin.json")));
   assert.equal(settingsManifest.mcpServers, undefined);
@@ -88,6 +88,14 @@ test("staging extends the hidden unified plugin and invalidates the browser-only
   stage();
   assert.equal(fs.existsSync(legacyMcp), false);
   assert.equal(JSON.parse(fs.readFileSync(path.join(target, ".codex-plugin/plugin.json"))).version, version);
+  const manifestPath = path.join(target, ".codex-plugin/plugin.json");
+  const previousManifest = JSON.parse(fs.readFileSync(manifestPath));
+  previousManifest.version = "26.901.41600-linux-native.1";
+  fs.writeFileSync(manifestPath, JSON.stringify(previousManifest));
+  stage();
+  assert.equal(JSON.parse(fs.readFileSync(manifestPath)).version, version);
+  stage();
+  assert.equal(JSON.parse(fs.readFileSync(manifestPath)).version, version);
   fs.writeFileSync(path.join(target, "scripts/launch.mjs"), "upstream drift");
   assert.throws(stage, /unified.*contract/i);
 });
